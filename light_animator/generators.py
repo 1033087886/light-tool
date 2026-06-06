@@ -29,10 +29,11 @@ def apply_flow(
 
     peak = clamp_byte(peak)
     tail = max(0, int(tail))
+    direction = 1 if end_pos >= start_pos else -1
     for order, frame_index in enumerate(frames):
         t = order / max(1, len(frames) - 1)
         center = start_pos + (end_pos - start_pos) * t
-        _overwrite_leds(project, frame_index, leds, center, peak, tail)
+        _overwrite_leds(project, frame_index, leds, center, peak, tail, direction)
     project.touch()
 
 
@@ -116,12 +117,20 @@ def apply_center_gather(
 
 
 def _overwrite_leds(
-    project: LightProject, frame_index: int, leds: list[int], center: float, peak: int, tail: int
+    project: LightProject,
+    frame_index: int,
+    leds: list[int],
+    center: float,
+    peak: int,
+    tail: int,
+    direction: int,
 ) -> None:
     frame_values = project.frames[frame_index].values
     for led_index in leds:
-        distance = abs(led_index - center)
-        if tail == 0:
+        distance = (center - led_index) * direction
+        if distance < 0:
+            value = 0
+        elif tail == 0:
             value = peak if distance < 0.5 else 0
         elif distance <= tail:
             value = peak * (1 - distance / (tail + 1))

@@ -46,6 +46,22 @@ class CoreTestCase(unittest.TestCase):
             self.assertEqual(project.frames[frame_index].values[6:], [11, 11])
             self.assertGreater(max(project.frames[frame_index].values[2:6]), 11)
 
+    def test_flow_keeps_unreached_leds_off(self):
+        project = LightProject.create(led_count=8, frame_count=1)
+
+        apply_flow(project, GeneratorRange(0, 0, 0, 7), start_pos=2, end_pos=6, peak=200, tail=3)
+
+        self.assertEqual(project.frames[0].values[2], 200)
+        self.assertEqual(project.frames[0].values[3:], [0, 0, 0, 0, 0])
+
+    def test_reverse_flow_keeps_unreached_leds_off(self):
+        project = LightProject.create(led_count=8, frame_count=1)
+
+        apply_flow(project, GeneratorRange(0, 0, 0, 7), start_pos=5, end_pos=1, peak=200, tail=3)
+
+        self.assertEqual(project.frames[0].values[5], 200)
+        self.assertEqual(project.frames[0].values[:5], [0, 0, 0, 0, 0])
+
     def test_meteor_and_center_gather_produce_brightness(self):
         project = LightProject.create(led_count=12, frame_count=6)
         area = GeneratorRange(0, 5, 0, 11)

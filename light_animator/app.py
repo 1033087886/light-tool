@@ -7,7 +7,9 @@ from PyQt6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QColor, QLinearGradient, QPainter, QPen
 from PyQt6.QtWidgets import (
     QApplication,
+    QColorDialog,
     QComboBox,
+    QDialog,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -37,6 +39,15 @@ from .model import LightProject, clamp_byte, normalized_range
 
 
 APP_NAME = "车灯动画编辑器"
+
+PREVIEW_COLOR_PRESETS = [
+    ("白光", "#f6f8ff"),
+    ("暖白", "#ffe7a6"),
+    ("琥珀", "#ffbf45"),
+    ("红光", "#ff3b30"),
+    ("蓝光", "#3d8bff"),
+    ("青色", "#39d5ff"),
+]
 
 
 class LedMatrixWidget(QWidget):
@@ -261,6 +272,237 @@ class PreviewStrip(QWidget):
             painter.drawRoundedRect(rect, 4, 4)
 
 
+class PlaybackPreviewCanvas(QWidget):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.values: list[int] = []
+        self.frame_index = 0
+        self.frame_count = 0
+        self.preview_color = QColor(PREVIEW_COLOR_PRESETS[0][1])
+        self.setMinimumHeight(180)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+    def set_frame(self, values: list[int], frame_index: int, frame_count: int) -> None:
+        self.values = list(values)
+        self.frame_index = frame_index
+        self.frame_count = frame_count
+        self.update()
+
+    def set_preview_color(self, color: QColor) -> None:
+        if color.isValid():
+            self.preview_color = QColor(color)
+            self.update()
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#05080d"))
+
+        if not self.values:
+            painter.setPen(QColor("#66717f"))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "无预览数据")
+            return
+
+        margin = 28
+        width = max(1, self.width() - margin * 2)
+        gap = 5 if len(self.values) <= 64 else 2
+        cell_w = max(5, int((width - gap * (len(self.values) - 1)) / max(1, len(self.values))))
+        cell_h = max(34, min(96, self.height() - 78))
+        y = (self.height() - cell_h) // 2 + 8
+
+        painter.setPen(QPen(QColor("#172635"), 1))
+        baseline_y = min(self.height() - 38, y + cell_h + 18)
+        painter.drawLine(margin, baseline_y, self.width() - margin, baseline_y)
+
+        for index, value in enumerate(self.values):
+            x = margin + index * (cell_w + gap)
+            rect = QRect(x, y, cell_w, cell_h)
+            value = clamp_byte(value)
+            color = self._color_for_value(value)
+            if value > 0:
+                glow_alpha = min(150, 35 + value // 2)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(color.red(), color.green(), color.blue(), glow_alpha))
+                painter.drawRoundedRect(rect.adjusted(-4, -4, 4, 4), 10, 10)
+
+            if value <= 0:
+                painter.fillRect(rect, color)
+            else:
+                gradient = QLinearGradient(
+                    float(rect.left()),
+                    float(rect.top()),
+                    float(rect.right()),
+                    float(rect.bottom()),
+                )
+                gradient.setColorAt(0, color.lighter(135))
+                gradient.setColorAt(1, color.darker(140))
+                painter.fillRect(rect, gradient)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor("#27313c"), 1))
+            painter.drawRoundedRect(rect, 5, 5)
+
+        painter.setPen(QColor("#6d7d8f"))
+        painter.drawText(
+            QRect(margin, baseline_y + 6, self.width() - margin * 2, 20),
+            Qt.AlignmentFlag.AlignCenter,
+            f"Frame {self.frame_index + 1} / {self.frame_count}",
+        )
+
+    def _color_for_value(self, value: int) -> QColor:
+        value = clamp_byte(value)
+        if value <= 0:
+            return QColor("#000000")
+        ratio = value / 255
+        return QColor(
+            int(self.preview_color.red() * ratio),
+            int(self.preview_color.green() * ratio),
+            int(self.preview_color.blue() * ratio),
+        )
+
+
+class PlaybackPreviewWindow(QDialog):
+    def __init__(self, project: LightProject, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.project = project
+        self.current_frame = 0
+        self.is_playing = False
+        self.preview_color = QColor(PREVIEW_COLOR_PRESETS[0][1])
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._advance_frame)
+
+        self.setWindowTitle("播放预览")
+        self.resize(980, 300)
+        self.setMinimumSize(640, 240)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(12)
+
+        header = QHBoxLayout()
+        title = QLabel("播放预览")
+        title.setObjectName("panelTitle")
+        header.addWidget(title)
+        header.addStretch(1)
+        self.status_label = QLabel()
+        self.status_label.setObjectName("statusText")
+        header.addWidget(self.status_label)
+        layout.addLayout(header)
+
+        self.canvas = PlaybackPreviewCanvas()
+        self.canvas.set_preview_color(self.preview_color)
+        layout.addWidget(self.canvas, 1)
+
+        controls = QHBoxLayout()
+        controls.addWidget(QLabel("颜色"))
+        self.color_combo = QComboBox()
+        for label, _ in PREVIEW_COLOR_PRESETS:
+            self.color_combo.addItem(label)
+        self.color_combo.currentIndexChanged.connect(self._apply_preset_color)
+        controls.addWidget(self.color_combo)
+        self.color_swatch = QLabel()
+        self.color_swatch.setFixedSize(22, 22)
+        controls.addWidget(self.color_swatch)
+        custom_color_button = QPushButton("自定义")
+        custom_color_button.clicked.connect(self.choose_preview_color)
+        controls.addWidget(custom_color_button)
+        controls.addStretch(1)
+        restart_button = QPushButton("从头")
+        restart_button.clicked.connect(self.restart)
+        controls.addWidget(restart_button)
+        self.play_button = QPushButton("播放")
+        self.play_button.clicked.connect(self.toggle_playback)
+        controls.addWidget(self.play_button)
+        close_button = QPushButton("关闭")
+        close_button.clicked.connect(self.close)
+        controls.addWidget(close_button)
+        layout.addLayout(controls)
+
+        self.set_preview_color(self.preview_color)
+        self.refresh()
+
+    def set_project(self, project: LightProject) -> None:
+        self.project = project
+        self.current_frame = min(self.current_frame, len(self.project.frames) - 1)
+        self.refresh()
+
+    def set_frame_index(self, frame_index: int) -> None:
+        if not self.project.frames:
+            return
+        self.current_frame = max(0, min(len(self.project.frames) - 1, int(frame_index)))
+        self.refresh()
+
+    def refresh(self) -> None:
+        if not self.project.frames:
+            self.canvas.set_frame([], 0, 0)
+            self.status_label.setText("0 ms")
+            return
+        self.current_frame = max(0, min(len(self.project.frames) - 1, self.current_frame))
+        frame = self.project.frames[self.current_frame]
+        self.canvas.set_frame(frame.values, self.current_frame, len(self.project.frames))
+        self.status_label.setText(
+            f"{frame.duration_ms} ms | {self.project.led_count} LEDs | {self.project.total_duration_ms()} ms"
+        )
+
+    def choose_preview_color(self) -> None:
+        color = QColorDialog.getColor(self.preview_color, self, "选择预览颜色")
+        if color.isValid():
+            self.set_preview_color(color)
+
+    def set_preview_color(self, color: QColor) -> None:
+        if not color.isValid():
+            return
+        self.preview_color = QColor(color)
+        self.canvas.set_preview_color(self.preview_color)
+        if hasattr(self, "color_swatch"):
+            self.color_swatch.setStyleSheet(
+                f"background: {self.preview_color.name()}; border: 1px solid #2b3a4c; border-radius: 4px;"
+            )
+        for index, (_, preset_hex) in enumerate(PREVIEW_COLOR_PRESETS):
+            if QColor(preset_hex).name() == self.preview_color.name():
+                self.color_combo.blockSignals(True)
+                self.color_combo.setCurrentIndex(index)
+                self.color_combo.blockSignals(False)
+                break
+
+    def _apply_preset_color(self, index: int) -> None:
+        if 0 <= index < len(PREVIEW_COLOR_PRESETS):
+            self.set_preview_color(QColor(PREVIEW_COLOR_PRESETS[index][1]))
+
+    def toggle_playback(self) -> None:
+        self.is_playing = not self.is_playing
+        self.play_button.setText("暂停" if self.is_playing else "播放")
+        if self.is_playing:
+            self._start_timer_for_current_frame()
+        else:
+            self.timer.stop()
+
+    def restart(self) -> None:
+        self.current_frame = 0
+        self.refresh()
+        if self.is_playing:
+            self._start_timer_for_current_frame()
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        self.timer.stop()
+        self.is_playing = False
+        self.play_button.setText("播放")
+        super().closeEvent(event)
+
+    def _advance_frame(self) -> None:
+        if not self.project.frames:
+            return
+        self.current_frame = (self.current_frame + 1) % len(self.project.frames)
+        self.refresh()
+        if self.is_playing:
+            self._start_timer_for_current_frame()
+
+    def _start_timer_for_current_frame(self) -> None:
+        if not self.project.frames:
+            return
+        self.timer.start(self.project.frames[self.current_frame].duration_ms)
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -271,6 +513,8 @@ class MainWindow(QMainWindow):
         self.is_playing = False
         self.frame_clipboard: dict[str, object] | None = None
         self.selection_clipboard: dict[str, object] | None = None
+        self.playback_window: PlaybackPreviewWindow | None = None
+        self.event_filter_installed = False
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._advance_preview)
 
@@ -283,6 +527,7 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if app:
             app.installEventFilter(self)
+            self.event_filter_installed = True
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -450,6 +695,10 @@ class MainWindow(QMainWindow):
         fit_zoom = QPushButton("适配")
         fit_zoom.clicked.connect(self.fit_matrix_to_view)
         header.addWidget(fit_zoom)
+
+        preview_window_button = QPushButton("预览窗口")
+        preview_window_button.clicked.connect(self.open_playback_preview)
+        header.addWidget(preview_window_button)
 
         self.play_button = QPushButton("播放")
         self.play_button.clicked.connect(self.toggle_playback)
@@ -740,6 +989,7 @@ class MainWindow(QMainWindow):
         self.matrix.set_project(self.project)
         self.select_frame(min(self.current_frame, len(self.project.frames) - 1))
         self.refresh_export()
+        self.refresh_playback_preview()
 
     def _sync_frame_list(self) -> None:
         self.frame_list.blockSignals(True)
@@ -778,6 +1028,8 @@ class MainWindow(QMainWindow):
         self.duration_spin.blockSignals(False)
         self.matrix.set_selected_frame(row)
         self.preview.set_values(list(self.project.frames[row].values))
+        if self.playback_window and self.playback_window.isVisible() and not self.playback_window.is_playing:
+            self.playback_window.set_frame_index(row)
         self._update_status()
 
     def set_brush_value(self, value: int) -> None:
@@ -807,6 +1059,20 @@ class MainWindow(QMainWindow):
         height_ratio = max(1, viewport.height() - 24) / max(1, base_height)
         percent = int(min(width_ratio, height_ratio) * 100)
         self.set_matrix_zoom(max(50, min(220, percent)))
+
+    def open_playback_preview(self) -> None:
+        if self.playback_window is None:
+            self.playback_window = PlaybackPreviewWindow(self.project, self)
+        else:
+            self.playback_window.set_project(self.project)
+        self.playback_window.set_frame_index(self.current_frame)
+        self.playback_window.show()
+        self.playback_window.raise_()
+        self.playback_window.activateWindow()
+
+    def refresh_playback_preview(self) -> None:
+        if self.playback_window and self.playback_window.isVisible():
+            self.playback_window.set_project(self.project)
 
     def change_led_count(self, value: int) -> None:
         if value < self.project.led_count:
@@ -1027,6 +1293,7 @@ class MainWindow(QMainWindow):
         self.matrix.set_project(self.project)
         self.select_frame(min(self.current_frame, len(self.project.frames) - 1))
         self.refresh_export()
+        self.refresh_playback_preview()
 
     def _selection_area(self) -> GeneratorRange:
         return GeneratorRange(
@@ -1050,6 +1317,15 @@ class MainWindow(QMainWindow):
         if event.type() == QEvent.Type.KeyPress and self._handle_copy_paste_shortcut(event):
             return True
         return super().eventFilter(source, event)
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        app = QApplication.instance()
+        if app and self.event_filter_installed:
+            app.removeEventFilter(self)
+            self.event_filter_installed = False
+        if self.playback_window:
+            self.playback_window.close()
+        super().closeEvent(event)
 
     def _handle_copy_paste_shortcut(self, event) -> bool:
         if self._focus_in_export_text():

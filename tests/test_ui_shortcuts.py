@@ -1,10 +1,11 @@
 import unittest
 
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor, QImage, QPainter
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
 
-from light_animator.app import MainWindow
+from light_animator.app import MainWindow, PlaybackPreviewCanvas
 
 
 class ShortcutTestCase(unittest.TestCase):
@@ -65,6 +66,38 @@ class ShortcutTestCase(unittest.TestCase):
         self.assertEqual(self.window.project.frames[2].values[5:8], [21, 22, 23])
         self.assertEqual(self.window.project.frames[3].values[5:8], [31, 32, 33])
         self.assertEqual(self.window.project.frames[2].duration_ms, 99)
+
+    def test_playback_preview_keeps_off_leds_black_with_red_preview_color(self):
+        canvas = PlaybackPreviewCanvas()
+        canvas.set_preview_color(QColor("#ff0000"))
+
+        self.assertEqual(canvas._color_for_value(0).name(), "#000000")
+        self.assertNotEqual(canvas._color_for_value(1).name(), "#000000")
+
+    def test_playback_preview_does_not_fill_off_leds_with_previous_glow(self):
+        canvas = PlaybackPreviewCanvas()
+        values = [0] * 8
+        values[0] = 255
+        canvas.resize(520, 220)
+        canvas.set_preview_color(QColor("#f6f8ff"))
+        canvas.set_frame(values, 0, 1)
+
+        image = QImage(canvas.size(), QImage.Format.Format_ARGB32)
+        image.fill(QColor("#000000"))
+        painter = QPainter(image)
+        canvas.render(painter)
+        painter.end()
+        margin = 28
+        gap = 5
+        width = max(1, canvas.width() - margin * 2)
+        cell_w = max(5, int((width - gap * (len(values) - 1)) / max(1, len(values))))
+        cell_h = max(34, min(96, canvas.height() - 78))
+        y = (canvas.height() - cell_h) // 2 + 8
+        off_led_x = margin + (cell_w + gap) + cell_w // 2
+        off_led_y = y + cell_h // 2
+        off_color = image.pixelColor(off_led_x, off_led_y)
+
+        self.assertEqual(off_color.name(), "#000000")
 
 
 if __name__ == "__main__":
