@@ -68,6 +68,20 @@ class LightProject:
         self.frames = [frame.normalized(self.led_count) for frame in self.frames]
         self.touch()
 
+    def set_frame_count(self, frame_count: int) -> None:
+        frame_count = max(1, int(frame_count))
+        current_count = len(self.frames)
+        if frame_count < current_count:
+            self.frames = self.frames[:frame_count]
+        elif frame_count > current_count:
+            self.frames.extend(
+                AnimationFrame(DEFAULT_DURATION_MS, [0] * self.led_count)
+                for _ in range(frame_count - current_count)
+            )
+        if not self.frames:
+            self.frames.append(AnimationFrame(DEFAULT_DURATION_MS, [0] * self.led_count))
+        self.touch()
+
     def insert_frame(self, index: int, frame: AnimationFrame | None = None) -> int:
         index = max(0, min(len(self.frames), int(index)))
         new_frame = frame.normalized(self.led_count) if frame else AnimationFrame(

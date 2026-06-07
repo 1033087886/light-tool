@@ -3,7 +3,7 @@ import unittest
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QImage, QPainter
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QSpinBox
 
 from light_animator.app import MainWindow, PlaybackPreviewCanvas
 
@@ -66,6 +66,45 @@ class ShortcutTestCase(unittest.TestCase):
         self.assertEqual(self.window.project.frames[2].values[5:8], [21, 22, 23])
         self.assertEqual(self.window.project.frames[3].values[5:8], [31, 32, 33])
         self.assertEqual(self.window.project.frames[2].duration_ms, 99)
+
+    def test_led_count_spin_resizes_without_confirmation(self):
+        self.window.project.frames[0].values = list(range(self.window.project.led_count))
+
+        self.window.led_count_spin.setValue(8)
+        self.app.processEvents()
+
+        self.assertEqual(self.window.project.led_count, 8)
+        self.assertEqual(self.window.project.frames[0].values, list(range(8)))
+
+    def test_frame_count_spin_resizes_and_clamps_current_frame(self):
+        self.window.select_frame(10)
+
+        self.window.frame_count_spin.setValue(6)
+        self.app.processEvents()
+
+        self.assertEqual(len(self.window.project.frames), 6)
+        self.assertEqual(self.window.current_frame, 5)
+        self.assertEqual(self.window.frame_start_spin.maximum(), 6)
+
+    def test_frame_list_duration_text_edit_updates_duration(self):
+        item = self.window.frame_list.item(0)
+        item.setText("001    66 ms")
+        self.app.processEvents()
+
+        self.assertEqual(self.window.project.frames[0].duration_ms, 66)
+
+        item = self.window.frame_list.item(0)
+        item.setText("88")
+        self.app.processEvents()
+
+        self.assertEqual(self.window.project.frames[0].duration_ms, 88)
+
+    def test_frame_list_uses_numeric_duration_editor(self):
+        index = self.window.frame_list.model().index(0, 0)
+        editor = self.window.frame_list.itemDelegate().createEditor(self.window.frame_list, None, index)
+
+        self.assertIsInstance(editor, QSpinBox)
+        self.assertEqual(editor.suffix(), " ms")
 
     def test_playback_preview_keeps_off_leds_black_with_red_preview_color(self):
         canvas = PlaybackPreviewCanvas()

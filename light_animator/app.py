@@ -7,6 +7,7 @@ from PyQt6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QColor, QLinearGradient, QPainter, QPen
 from PyQt6.QtWidgets import (
     QApplication,
+    QAbstractItemView,
     QColorDialog,
     QComboBox,
     QDialog,
@@ -26,6 +27,7 @@ from PyQt6.QtWidgets import (
     QSlider,
     QSpinBox,
     QSplitter,
+    QStyledItemDelegate,
     QTextEdit,
     QToolButton,
     QVBoxLayout,
@@ -34,7 +36,19 @@ from PyQt6.QtWidgets import (
 
 from . import __version__
 from .exporter import export_c_header, load_project, save_project
-from .generators import GeneratorRange, apply_center_gather, apply_flow, apply_meteor
+from .generators import (
+    GeneratorRange,
+    apply_breathe,
+    apply_center_bloom_chase,
+    apply_center_expand,
+    apply_center_gather,
+    apply_center_pulse,
+    apply_edge_fill,
+    apply_flow,
+    apply_layered_stack_chase,
+    apply_meteor,
+    apply_segment_blink,
+)
 from .model import LightProject, clamp_byte, normalized_range
 
 
@@ -48,6 +62,46 @@ PREVIEW_COLOR_PRESETS = [
     ("蓝光", "#3d8bff"),
     ("青色", "#39d5ff"),
 ]
+
+
+def _frame_list_text(index: int, duration_ms: int) -> str:
+    return f"{index + 1:03d}    {duration_ms} ms"
+
+
+def _parse_frame_duration_text(text: str) -> int | None:
+    cleaned = text.strip().lower()
+    if cleaned.endswith("ms"):
+        cleaned = cleaned[:-2].strip()
+    if not cleaned:
+        return None
+    token = cleaned.split()[-1]
+    try:
+        value = int(token)
+    except ValueError:
+        return None
+    if value < 1:
+        return None
+    return min(value, 5000)
+
+
+class FrameDurationDelegate(QStyledItemDelegate):
+    def createEditor(self, parent: QWidget, option, index):  # type: ignore[override]
+        del option, index
+        editor = QSpinBox(parent)
+        editor.setRange(1, 5000)
+        editor.setSuffix(" ms")
+        editor.setFrame(False)
+        return editor
+
+    def setEditorData(self, editor: QWidget, index) -> None:  # type: ignore[override]
+        if isinstance(editor, QSpinBox):
+            text = str(index.model().data(index, Qt.ItemDataRole.DisplayRole) or "")
+            editor.setValue(_parse_frame_duration_text(text) or 40)
+            editor.selectAll()
+
+    def setModelData(self, editor: QWidget, model, index) -> None:  # type: ignore[override]
+        if isinstance(editor, QSpinBox):
+            model.setData(index, _frame_list_text(index.row(), editor.value()), Qt.ItemDataRole.EditRole)
 
 
 class LedMatrixWidget(QWidget):
@@ -598,6 +652,12 @@ class MainWindow(QMainWindow):
         self.led_count_spin.valueChanged.connect(self.change_led_count)
         layout.addWidget(self.led_count_spin)
 
+        self.frame_count_spin = QSpinBox()
+        self.frame_count_spin.setRange(1, 9999)
+        self.frame_count_spin.setPrefix("帧 ")
+        self.frame_count_spin.valueChanged.connect(self.change_frame_count)
+        layout.addWidget(self.frame_count_spin)
+
         for text, handler in [
             ("新建", self.new_project),
             ("打开", self.open_project),
@@ -622,7 +682,12 @@ class MainWindow(QMainWindow):
         layout.addWidget(label)
 
         self.frame_list = QListWidget()
+        self.frame_list.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked | QAbstractItemView.EditTrigger.EditKeyPressed
+        )
+        self.frame_list.setItemDelegate(FrameDurationDelegate(self.frame_list))
         self.frame_list.currentRowChanged.connect(self.select_frame)
+        self.frame_list.itemChanged.connect(self.change_frame_duration_from_item)
         layout.addWidget(self.frame_list, 1)
 
         row = QHBoxLayout()
@@ -804,7 +869,20 @@ class MainWindow(QMainWindow):
         group.setMinimumHeight(292)
         layout = QGridLayout(group)
         self.generator_combo = QComboBox()
-        self.generator_combo.addItems(["流水", "流星", "双侧聚集"])
+        self.generator_combo.addItems(
+            [
+                "流水",
+                "流星",
+                "双侧聚集",
+                "全段呼吸",
+                "中心点亮",
+                "中心外扩",
+                "两侧填充",
+                "分段闪烁",
+                "中心扩张追光",
+                "分层堆叠追光",
+            ]
+        )
         self.gen_start_spin = self._spin(0, 0, 255)
         self.gen_end_spin = self._spin(255, 0, 255)
         self.gen_peak_spin = self._spin(255, 0, 255)
@@ -983,6 +1061,9 @@ class MainWindow(QMainWindow):
         self.led_count_spin.blockSignals(True)
         self.led_count_spin.setValue(self.project.led_count)
         self.led_count_spin.blockSignals(False)
+        self.frame_count_spin.blockSignals(True)
+        self.frame_count_spin.setValue(len(self.project.frames))
+        self.frame_count_spin.blockSignals(False)
 
         self._sync_frame_list()
         self._sync_ranges()
@@ -995,7 +1076,8 @@ class MainWindow(QMainWindow):
         self.frame_list.blockSignals(True)
         self.frame_list.clear()
         for index, frame in enumerate(self.project.frames):
-            item = QListWidgetItem(f"{index + 1:03d}    {frame.duration_ms} ms")
+            item = QListWidgetItem(_frame_list_text(index, frame.duration_ms))
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
             self.frame_list.addItem(item)
         self.frame_list.setCurrentRow(self.current_frame)
         self.frame_list.blockSignals(False)
@@ -1075,23 +1157,37 @@ class MainWindow(QMainWindow):
             self.playback_window.set_project(self.project)
 
     def change_led_count(self, value: int) -> None:
-        if value < self.project.led_count:
-            result = QMessageBox.question(
-                self,
-                "调整 LED 数量",
-                "减少 LED 数量会截断新上限之后的数据，是否继续？",
-            )
-            if result != QMessageBox.StandardButton.Yes:
-                self.led_count_spin.blockSignals(True)
-                self.led_count_spin.setValue(self.project.led_count)
-                self.led_count_spin.blockSignals(False)
-                return
         self.project.set_led_count(value)
+        self.mark_dirty_and_refresh()
+
+    def change_frame_count(self, value: int) -> None:
+        self.project.set_frame_count(value)
+        self.current_frame = min(self.current_frame, len(self.project.frames) - 1)
         self.mark_dirty_and_refresh()
 
     def change_frame_duration(self, value: int) -> None:
         self.project.set_duration(self.current_frame, value)
         self.mark_dirty_and_refresh()
+
+    def change_frame_duration_from_item(self, item: QListWidgetItem) -> None:
+        row = self.frame_list.row(item)
+        if row < 0 or row >= len(self.project.frames):
+            return
+        value = _parse_frame_duration_text(item.text())
+        if value is None:
+            self._restore_frame_list_item(row)
+            return
+        self.current_frame = row
+        self.project.set_duration(row, value)
+        self.mark_dirty_and_refresh()
+
+    def _restore_frame_list_item(self, row: int) -> None:
+        item = self.frame_list.item(row)
+        if item is None:
+            return
+        self.frame_list.blockSignals(True)
+        item.setText(_frame_list_text(row, self.project.frames[row].duration_ms))
+        self.frame_list.blockSignals(False)
 
     def add_frame(self) -> None:
         self.current_frame = self.project.add_frame()
@@ -1150,10 +1246,86 @@ class MainWindow(QMainWindow):
                 self.gen_peak_spin.value(),
                 self.gen_tail_spin.value(),
             )
-        else:
+        elif gen_type == "双侧聚集":
             apply_center_gather(
                 self.project,
                 area,
+                self.gen_peak_spin.value(),
+                self.gen_tail_spin.value(),
+                self.gen_center_width_spin.value(),
+                self.gen_hold_spin.value(),
+            )
+        elif gen_type == "全段呼吸":
+            apply_breathe(
+                self.project,
+                area,
+                self.gen_start_spin.value(),
+                self.gen_end_spin.value(),
+                self.gen_peak_spin.value(),
+                self.gen_tail_spin.value(),
+                self.gen_hold_spin.value(),
+            )
+        elif gen_type == "中心点亮":
+            apply_center_pulse(
+                self.project,
+                area,
+                self.gen_start_spin.value(),
+                self.gen_end_spin.value(),
+                self.gen_peak_spin.value(),
+                self.gen_tail_spin.value(),
+                self.gen_center_width_spin.value(),
+                self.gen_hold_spin.value(),
+            )
+        elif gen_type == "中心外扩":
+            apply_center_expand(
+                self.project,
+                area,
+                self.gen_start_spin.value(),
+                self.gen_end_spin.value(),
+                self.gen_peak_spin.value(),
+                self.gen_tail_spin.value(),
+                self.gen_center_width_spin.value(),
+                self.gen_hold_spin.value(),
+            )
+        elif gen_type == "两侧填充":
+            apply_edge_fill(
+                self.project,
+                area,
+                self.gen_start_spin.value(),
+                self.gen_end_spin.value(),
+                self.gen_peak_spin.value(),
+                self.gen_tail_spin.value(),
+                self.gen_center_width_spin.value(),
+                self.gen_hold_spin.value(),
+            )
+        elif gen_type == "分段闪烁":
+            apply_segment_blink(
+                self.project,
+                area,
+                self.gen_start_spin.value(),
+                self.gen_end_spin.value(),
+                self.gen_peak_spin.value(),
+                self.gen_tail_spin.value(),
+                self.gen_center_width_spin.value(),
+                self.gen_hold_spin.value(),
+            )
+        elif gen_type == "中心扩张追光":
+            apply_center_bloom_chase(
+                self.project,
+                area,
+                self.gen_start_spin.value(),
+                self.gen_end_spin.value(),
+                self.gen_peak_spin.value(),
+                self.gen_tail_spin.value(),
+                self.gen_center_width_spin.value(),
+                self.gen_hold_spin.value(),
+            )
+        else:
+            apply_layered_stack_chase(
+                self.project,
+                area,
+                self.gen_start_spin.value(),
+                self.gen_end_spin.value(),
                 self.gen_peak_spin.value(),
                 self.gen_tail_spin.value(),
                 self.gen_center_width_spin.value(),
@@ -1178,7 +1350,7 @@ class MainWindow(QMainWindow):
     def new_project(self) -> None:
         if not self._confirm_discard():
             return
-        self.project = LightProject.create(self.led_count_spin.value(), 16)
+        self.project = LightProject.create(self.led_count_spin.value(), self.frame_count_spin.value())
         self.current_path = None
         self.current_frame = 0
         self.is_dirty = False
